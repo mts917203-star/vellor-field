@@ -7,7 +7,7 @@
 // метаданные живут в "files" и меняются сколько угодно. Перед чтением Blob всегда берётся заново.
 
 const DB_NAME = "vellor-field";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 let dbPromise;
 
 function open() {
@@ -40,9 +40,23 @@ function open() {
             cur.continue();
           };
         }
+        if (ev.oldVersion < 3) {
+          // Реестр объектов: с ПК (по списку OBJECTS) и созданные на телефоне (id = UUID).
+          db.createObjectStore("props", { keyPath: "id" });
+        }
       };
-      req.onsuccess = () => resolve(req.result);
+      req.onsuccess = () => {
+        const db = req.result;
+        // Если открылась новая версия приложения (обновление схемы) — эта копия отпускает базу.
+        db.onversionchange = () => { db.close(); dbPromise = null; location.reload(); };
+        resolve(db);
+      };
       req.onerror = () => reject(req.error);
+      // Обновление схемы ждёт, пока старая копия приложения (другая вкладка) закроет базу.
+      req.onblocked = () => {
+        const t = document.getElementById("toast");
+        if (t) { t.textContent = "Закройте другие окна VELLOR — идёт обновление хранилища"; t.hidden = false; }
+      };
     });
   }
   return dbPromise;
@@ -75,6 +89,14 @@ export const visits = {
   all: () => tx("visits", "readonly", (s) => wrap(s.getAll())).then((a) => a.sort((x, y) => y.created_at.localeCompare(x.created_at))),
   get: (id) => tx("visits", "readonly", (s) => wrap(s.get(id))),
   put: (v) => tx("visits", "readwrite", (s) => { s.put(v); }),
+};
+
+/** Объекты: {id, code|null, title, address, source: "pc"|"phone", created_at}. */
+export const props = {
+  all: () => tx("props", "readonly", (s) => wrap(s.getAll())).then((a) =>
+    a.sort((x, y) => (y.code || "~").localeCompare(x.code || "~") || (y.created_at || "").localeCompare(x.created_at || ""))),
+  get: (id) => tx("props", "readonly", (s) => wrap(s.get(id))),
+  put: (p) => tx("props", "readwrite", (s) => { s.put(p); }),
 };
 
 /** Байты файлов: запись один раз, без перезаписи. */

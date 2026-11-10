@@ -9,7 +9,7 @@
 
 import { APP_VERSION, CONFIG } from "./config.js";
 import { sha256Blob } from "./hash.js";
-import { blobs, files, kv, log, visits } from "./store.js";
+import { blobs, files, kv, log, props, visits } from "./store.js";
 import { ApiError, AuthError, NetError, UnreadableError, YaDisk } from "./yadisk.js";
 
 export class IntegrityError extends Error {}
@@ -123,14 +123,25 @@ async function uploadFile(yd, f) {
   }
 }
 
-function buildManifest(v, list) {
+/** Версия манифеста: 1 — первая отправка, 2+ — дополнения осмотра. */
+export const manifestVersion = (v) => v.manifest_version || 1;
+const manifestName = (v) => (manifestVersion(v) === 1 ? `${v.id}__manifest.json` : `${v.id}__manifest_v${manifestVersion(v)}.json`);
+const markerBase = (v) => (manifestVersion(v) === 1 ? v.id : `${v.id}.v${manifestVersion(v)}`);
+
+async function buildManifest(v, list) {
+  // Объект: известный код с ПК или новый объект с телефона (ПК присвоит код и запомнит client_id).
+  const p = v.property_id ? await props.get(v.property_id) : null;
+  const code = p?.code || (p ? "NEW" : v.property_code || CONFIG.DEFAULT_PROPERTY);
   return {
     format: "vellor-1",
     source: "vellor-pwa",
     app_version: APP_VERSION,
     package: v.id,
-    property_code: v.property_code || CONFIG.DEFAULT_PROPERTY,
-    address: v.address || "",
+    manifest_version: manifestVersion(v),
+    property_code: code,
+    property_client_id: p?.source === "phone" ? p.id : undefined,
+    property_title: p?.title || undefined,
+    address: v.address || p?.address || "",
     visit_at: v.visit_at,
     visit_type: v.visit_type || "Тест прототипа",
     notes: v.notes || "",
@@ -155,13 +166,13 @@ async function syncVisit(yd, v) {
 
   // Манифест — последним и неизменным между повторами (иначе хэш разойдётся).
   if (!v.manifest_json) {
-    v.manifest_json = JSON.stringify(buildManifest(v, list), null, 2);
+    v.manifest_json = JSON.stringify(await buildManifest(v, list), null, 2);
     v.manifest_sha = await sha256Blob(new Blob([v.manifest_json]));
     await visits.put(v);
   }
   const blob = new Blob([v.manifest_json], { type: "application/json" });
   try {
-    const res = await uploadVerified(yd, remotePath(`${v.id}__manifest.json`), blob, v.manifest_sha);
+    const res = await uploadVerified(yd, remotePath(manifestName(v)), blob, v.manifest_sha);
     v.status = "cloud";
     v.cloud_at = new Date().toISOString();
     await visits.put(v);
@@ -181,19 +192,46 @@ async function checkPc(yd) {
   if (!pending.length) return;
   const names = new Set((await yd.list(CONFIG.STATUS)).map((i) => i.name));
   for (const v of pending) {
-    if (names.has(`${v.id}.ok.json`)) {
+    if (names.has(`${markerBase(v)}.ok.json`)) {
       v.status = "pc";
       v.pc_at = new Date().toISOString();
       v.pc_error = null;
       await visits.put(v);
       await log("info", `Осмотр ${v.id}: получен и проверен на ПК`);
       emit({ type: "visit", id: v.id });
-    } else if (names.has(`${v.id}.error.json`) && !v.pc_error) {
+    } else if (names.has(`${markerBase(v)}.error.json`) && !v.pc_error) {
       v.pc_error = "ПК сообщил об ошибке проверки — см. журнал на компьютере";
       await visits.put(v);
       emit({ type: "visit", id: v.id });
     }
   }
+}
+
+/**
+ * Объекты с ПК: ПК публикует их именами файлов в app:/OBJECTS
+ * («VL-0002 ~ 1a2b3c4d ~ Название ~ Адрес.obj») — читаем только список, без скачивания.
+ * Объект, созданный на телефоне, узнаём по первым 8 символам его id и получаем его код.
+ */
+export function parseObjectName(name) {
+  if (!name.endsWith(".obj")) return null;
+  const parts = name.slice(0, -4).split(" ~ ");
+  if (parts.length < 4 || !/^VL-\d{4}$/.test(parts[0])) return null;
+  const val = (s) => (s === "-" ? "" : s);
+  return { code: parts[0], client8: val(parts[1]), title: val(parts[2]), address: val(parts.slice(3).join(" ~ ")) };
+}
+
+async function syncObjects(yd) {
+  const items = (await yd.list(CONFIG.OBJECTS)).map((i) => parseObjectName(i.name)).filter(Boolean);
+  if (!items.length) return;
+  const local = await props.all();
+  let changed = 0;
+  for (const o of items) {
+    let p = (o.client8 && local.find((x) => x.source === "phone" && x.id.startsWith(o.client8))) || local.find((x) => x.code === o.code);
+    if (!p) p = { id: `pc-${o.code}`, source: "pc", created_at: new Date().toISOString() };
+    const next = { ...p, code: o.code, title: o.title || p.title || "", address: o.address || p.address || "" };
+    if (JSON.stringify(next) !== JSON.stringify(p)) { await props.put(next); changed++; }
+  }
+  if (changed) emit({ type: "props" });
 }
 
 /** Один проход синхронизации. Безопасно вызывать сколько угодно раз. */
@@ -210,6 +248,7 @@ export async function syncAll(reason = "") {
       for (const v of queue) await syncVisit(yd, v);
     }
     await checkPc(yd);
+    await syncObjects(yd);
     await kv.set("last_sync", { at: new Date().toISOString(), ok: true, reason });
   } catch (e) {
     const msg = e instanceof NetError ? `Нет связи: ${e.message}` : e.message;
