@@ -1,6 +1,6 @@
 // VELLOR FIELD — прототип мобильного приложения (PWA).
 
-import { APP_VERSION, CONFIG, DEV } from "./config.js";
+import { APP_VERSION, BUILD, CONFIG, DEV } from "./config.js";
 import { Sha256, sha256Blob } from "./hash.js";
 import { files, kv, log, recentLog, visits } from "./store.js";
 import { getClient, isSyncing, onSyncEvent, retryErrors, syncAll, uploadVerified } from "./sync.js";
@@ -165,13 +165,13 @@ async function renderLogin() {
     ${CONFIG.CLIENT_ID ? "" : `
     <label class="field"><span>Client ID приложения Яндекс OAuth (публичный, не секрет)</span>
       <input id="cid" class="input mono" value="${esc(id)}" placeholder="например 1a2b3c…" autocapitalize="off" autocomplete="off"></label>
-    <button id="cid-save" class="btn" style="margin-bottom:12px">Сохранить Client ID</button>`}
+    <button id="cid-save" class="btn mb-12">Сохранить Client ID</button>`}
     <button id="login" class="btn btn-gold" ${id ? "" : "disabled"}>Войти через Яндекс</button>
     <h2>Если вход не возвращает в приложение</h2>
     <div class="card small">
-      <p class="muted" style="margin-top:0">Откройте ссылку, войдите, скопируйте показанный код доступа и вставьте сюда:</p>
+      <p class="muted mt-0">Откройте ссылку, войдите, скопируйте показанный код доступа и вставьте сюда:</p>
       <a class="btn btn-ghost" id="manual-link" target="_blank" rel="noopener" ${id ? "" : "hidden"}>Получить код доступа</a>
-      <label class="field" style="margin-top:12px"><span>Токен доступа</span>
+      <label class="field mt-12"><span>Токен доступа</span>
         <input id="manual" class="input mono" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
       <button id="manual-save" class="btn">Сохранить токен</button>
     </div>`;
@@ -188,7 +188,7 @@ async function renderHome() {
   const rows = await Promise.all(all.map(async (v) => [v, await files.byVisit(v.id)]));
   $view.innerHTML = `
     <h1>Осмотры</h1>
-    <p class="lead small">Прототип ${esc(APP_VERSION)} · передача в Яндекс.Диск</p>
+    <p class="lead small">Прототип ${esc(APP_VERSION)} · сборка ${esc(BUILD)}</p>
     ${rows.length ? rows.map(([v, list]) => `
       <div class="card link" data-visit="${esc(v.id)}">
         <div class="card-row">
@@ -284,7 +284,7 @@ async function renderVisit(id) {
       <button class="btn tile" id="b-video"><span class="ico">▶</span>Видео</button>
       <button class="btn tile ${recorder ? "btn-rec" : ""}" id="b-voice"><span class="ico">${recorder ? '<span class="rec-dot"></span>' : "◉"}</span>${recorder ? "Стоп" : "Голос"}</button>
     </div>
-    <button class="btn btn-ghost" id="b-lib" style="margin-top:10px">Выбрать из галереи / файлов</button>
+    <button class="btn btn-ghost mt-10" id="b-lib">Выбрать из галереи / файлов</button>
     <input type="file" id="in-photo" class="hidden-input" accept="image/*" capture="environment">
     <input type="file" id="in-video" class="hidden-input" accept="video/*" capture="environment">
     <input type="file" id="in-lib" class="hidden-input" accept="image/*,image/heic,image/heif,video/*,audio/*" multiple>` : ""}
@@ -293,11 +293,11 @@ async function renderVisit(id) {
     <div class="card">${list.length ? list.map((f) => `
       <div class="file ${f.status === "cloud" ? "done" : ""}" id="file-${esc(f.id.replace("/", "-"))}">
         ${thumb(f)}
-        <div style="min-width:0">
+        <div class="minw0">
           <div class="file-name">${esc(f.name)}</div>
           <div class="file-meta">${esc(f.type || "?")} · ${fmtSize(f.size)}${f.sha256 ? ` · <span class="mono">${f.sha256.slice(0, 10)}…</span>` : ""}</div>
           ${f.error ? `<div class="file-meta ${f.status === "local" ? "warn" : "bad"}">${esc(f.error)}</div>` : ""}
-          ${f.error_kind === "unreadable" && f.status === "error" ? `<button class="btn btn-ghost btn-danger small" data-drop="${esc(f.id)}" style="min-height:34px;margin-top:6px">Исключить из осмотра</button>` : ""}
+          ${f.status !== "cloud" && !["cloud", "pc"].includes(v.status) ? `<button class="btn btn-ghost btn-danger small btn-drop" data-drop="${esc(f.id)}">Исключить из осмотра</button>` : ""}
           <div class="bar"><i></i></div>
         </div>
         ${fileStatusChip(f)}
@@ -345,9 +345,9 @@ async function renderVisit(id) {
   }
   $view.querySelectorAll("[data-drop]").forEach((b) => (b.onclick = async () => {
     const f = await files.get(b.dataset.drop);
-    if (!f || !confirm(`Исключить «${f.name}» из осмотра? Файл на телефоне уже недоступен, отправить его нельзя.`)) return;
+    if (!f || !confirm(`Исключить «${f.name}» из осмотра? Он не будет отправлен${f.error_kind === "unreadable" ? " (файл на телефоне уже недоступен)" : ""}.`)) return;
     await files.del(f.id);
-    await log("warn", `${f.name}: исключён из осмотра (файл недоступен на телефоне)`);
+    await log("warn", `${f.name}: исключён из осмотра пользователем`);
     render();
     syncAll("drop");
   }));
@@ -438,7 +438,7 @@ async function renderDiag(token) {
   $view.innerHTML = `
     <button class="btn btn-back" id="back">‹ Назад</button>
     <h1>Диагностика</h1>
-    <p class="lead small">Версия ${esc(APP_VERSION)} · API: <span class="mono">${esc(CONFIG.API_BASE)}</span>${DEV ? " · режим разработки" : ""}</p>
+    <p class="lead small">Версия ${esc(APP_VERSION)} · сборка <b>${esc(BUILD)}</b> · API: <span class="mono">${esc(CONFIG.API_BASE)}</span>${DEV ? " · режим разработки" : ""}</p>
     <div class="card">${checks.map((c) => `
       <div class="check"><div class="${c.ok === true ? "ok" : c.ok === null ? "warn" : "bad"}">${c.ok === true ? "✓" : c.ok === null ? "•" : "✕"}</div>
       <div><div>${esc(c.title)}</div><div class="small muted">${esc(c.detail)}</div></div></div>`).join("")}
@@ -447,11 +447,11 @@ async function renderDiag(token) {
       <button class="btn" id="t-hash">Тест SHA-256</button>
       <button class="btn" id="t-persist">Защитить хранилище</button>
     </div>
-    <button class="btn btn-gold" id="t-upload" style="margin-top:10px" ${token ? "" : "disabled"}>Тест загрузки в Яндекс.Диск</button>
-    <div id="t-out" class="card small mono" style="margin-top:10px" hidden></div>
+    <button class="btn btn-gold mt-10" id="t-upload" ${token ? "" : "disabled"}>Тест загрузки в Яндекс.Диск</button>
+    <div id="t-out" class="card small mono mt-10" hidden></div>
     <h2>Журнал</h2>
     <div class="card log">${logEntries.map((l) => `<div><span class="${l.level === "error" ? "bad" : l.level === "warn" ? "warn" : "muted"}">${esc(new Date(l.t).toLocaleTimeString("ru-RU"))}</span> ${esc(l.msg)}</div>`).join("") || "<div class='muted'>пусто</div>"}</div>
-    ${token ? `<button class="btn btn-ghost btn-danger" id="logout" style="margin-top:14px">Выйти из Яндекса</button>` : ""}`;
+    ${token ? `<button class="btn btn-ghost btn-danger mt-14" id="logout">Выйти из Яндекса</button>` : ""}`;
   document.getElementById("back").onclick = () => go({ name: "home" });
   const out = document.getElementById("t-out");
   const print = (s) => { out.hidden = false; out.textContent += s + "\n"; };
@@ -532,7 +532,7 @@ setInterval(() => document.visibilityState === "visible" && syncAll("timer"), 30
 document.getElementById("diag-btn").onclick = () => go({ name: route.name === "diag" ? "home" : "diag" });
 
 if ("serviceWorker" in navigator && isSecureContext) {
-  navigator.serviceWorker.register("sw.js").catch((e) => log("warn", `Service Worker: ${e.message}`));
+  navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).then((reg) => document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && reg.update().catch(() => {}))).catch((e) => log("warn", `Service Worker: ${e.message}`));
 }
 
 // Тестовый доступ для автоматических проверок на компьютере (только localhost).

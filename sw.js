@@ -1,7 +1,7 @@
 // Service Worker: оболочка приложения доступна без интернета.
 // Запросы к Яндекс.Диску (другой домен) не перехватываются и не кэшируются.
 
-const VERSION = "vellor-ddbc0620cc";
+const VERSION = "vellor-708f0d4a64";
 const SHELL = [
   "./", "index.html", "css/app.css", "manifest.webmanifest",
   "js/app.js", "js/config.js", "js/hash.js", "js/store.js", "js/sync.js", "js/yadisk.js",
@@ -21,11 +21,13 @@ self.addEventListener("activate", (e) => {
 });
 
 // Сеть в приоритете (чтобы обновления приходили сразу), кэш — если сети нет.
+// cache: "no-cache" — всегда сверяться с сервером: GitHub Pages разрешает HTTP-кэш на 10 минут,
+// и без этого телефон продолжал выполнять старую версию после публикации исправлений.
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== "GET" || url.origin !== self.location.origin) return;
   e.respondWith(
-    fetch(e.request)
+    fetch(e.request, { cache: "no-cache" })
       .then((resp) => {
         if (resp.ok) {
           const copy = resp.clone();
