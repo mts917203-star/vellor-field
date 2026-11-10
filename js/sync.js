@@ -9,7 +9,7 @@
 
 import { APP_VERSION, CONFIG } from "./config.js";
 import { sha256Blob } from "./hash.js";
-import { files, kv, log, visits } from "./store.js";
+import { blobs, files, kv, log, visits } from "./store.js";
 import { ApiError, AuthError, NetError, UnreadableError, YaDisk } from "./yadisk.js";
 
 export class IntegrityError extends Error {}
@@ -72,10 +72,10 @@ export function remotePath(name) {
   return `${CONFIG.INBOX}/${name}`;
 }
 
-async function ensureHashed(f) {
+async function ensureHashed(f, blob) {
   if (f.sha256) return f;
   emit({ type: "file", id: f.id, phase: "hashing", progress: 0 });
-  const sha = await sha256Blob(f.blob, (p) => emit({ type: "file", id: f.id, phase: "hashing", progress: p }));
+  const sha = await sha256Blob(blob, (p) => emit({ type: "file", id: f.id, phase: "hashing", progress: p }));
   return files.patch(f.id, { sha256: sha });
 }
 
@@ -88,27 +88,30 @@ async function checkReadable(blob) {
 }
 
 async function uploadFile(yd, f) {
+  // Метаданные сначала (статусы меняют запись files), Blob — после, свежий из хранилища blobs.
+  f = await files.patch(f.id, { status: "uploading", error: null, attempts: (f.attempts || 0) + 1 });
+  emit({ type: "file", id: f.id, phase: "uploading", progress: 0 });
+  const blob = await blobs.get(f.id);
   try {
-    await checkReadable(f.blob);
+    if (!blob) throw new UnreadableError("файла нет в хранилище телефона — добавьте его заново");
+    await checkReadable(blob);
   } catch (e) {
     await files.patch(f.id, { status: "error", error: e.message, error_kind: "unreadable" });
     await log("error", `${f.name}: ${e.message}`);
     emit({ type: "file", id: f.id, phase: "done" });
     return;
   }
-  f = await ensureHashed(f);
-  await files.patch(f.id, { status: "uploading", error: null, attempts: (f.attempts || 0) + 1 });
-  emit({ type: "file", id: f.id, phase: "uploading", progress: 0 });
-  await log("info", `${f.name} (${(f.size / 1048576).toFixed(1)} МБ): начало отправки, попытка ${(f.attempts || 0) + 1}`);
+  f = await ensureHashed(f, blob);
+  await log("info", `${f.name} (${(f.size / 1048576).toFixed(1)} МБ): начало отправки, попытка ${f.attempts}`);
   try {
-    const res = await uploadVerified(yd, remotePath(f.remote_name), f.blob, f.sha256,
+    const res = await uploadVerified(yd, remotePath(f.remote_name), blob, f.sha256,
       (p) => emit({ type: "file", id: f.id, phase: "uploading", progress: p }),
       (msg) => log("info", `${f.name}: ${msg}`));
     await files.patch(f.id, { status: "cloud", error: null, verified_at: new Date().toISOString(), dedup: res === "already" });
     await log("info", `${f.remote_name}: ${res === "already" ? "уже был в облаке (дубликат не создан)" : "загружен, SHA-256 совпал"}`);
   } catch (e) {
     if (e instanceof NetError || e instanceof AuthError) {
-      await files.patch(f.id, { status: "local", error: `${e.message} (попытка ${(f.attempts || 0) + 1}, повторим автоматически)` });
+      await files.patch(f.id, { status: "local", error: `${e.message} (попытка ${f.attempts}, повторим автоматически)` });
       throw e; // прерываем весь цикл — повторим, когда появится связь
     }
     const kind = e instanceof IntegrityError ? "integrity" : e instanceof ConflictError ? "conflict"

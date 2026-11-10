@@ -3,7 +3,7 @@
 // токен получает сам пользователь на телефоне и он хранится только на телефоне.
 
 export const APP_VERSION = "0.1.0-proto";
-export const BUILD = "10.11 04:32"; // проставляется при публикации (tools/build_pages.py)
+export const BUILD = "10.11 04:48"; // проставляется при публикации (tools/build_pages.py)
 
 export const CONFIG = {
   CLIENT_ID: "c267073e62ae42e498db4f7345baefd6", // заполняется после регистрации приложения на oauth.yandex.ru

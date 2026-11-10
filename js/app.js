@@ -2,7 +2,7 @@
 
 import { APP_VERSION, BUILD, CONFIG, DEV } from "./config.js";
 import { Sha256, sha256Blob } from "./hash.js";
-import { files, kv, log, recentLog, visits } from "./store.js";
+import { blobs, files, kv, log, recentLog, visits } from "./store.js";
 import { getClient, isSyncing, onSyncEvent, retryErrors, syncAll, uploadVerified } from "./sync.js";
 import { AuthError, YaDisk } from "./yadisk.js";
 
@@ -248,6 +248,7 @@ function captureGps(id) {
 function thumb(f) {
   const heic = /heic|heif/i.test(f.type + f.name);
   if (f.kind === "photo" && (!heic || /Apple/.test(navigator.vendor))) { // HEIC показывает только Safari
+    if (!f.blob) return `<div class="thumb">${KIND_ICON.photo}</div>`;
     if (!objectUrls.has(f.id)) objectUrls.set(f.id, URL.createObjectURL(f.blob));
     return `<img class="thumb" src="${objectUrls.get(f.id)}" alt="">`;
   }
@@ -258,6 +259,8 @@ async function renderVisit(id) {
   const v = await visits.get(id);
   if (!v) return go({ name: "home" });
   const list = await files.byVisit(id);
+  // миниатюры: свежий Blob из хранилища (только для показа, в метаданные не записывается)
+  for (const f of list) if (f.kind === "photo" && !objectUrls.has(f.id)) f.blob = await blobs.get(f.id).catch(() => null);
   const editable = v.status === "draft";
   const hasErr = list.some((f) => f.status === "error");
   $view.innerHTML = `
@@ -374,13 +377,14 @@ export async function addFile(visitId, file) {
   }
   const rec = {
     id: `${visitId}/${idx}`, visit_id: visitId, idx, name, type: file.type || "", size: own.size,
-    kind: kindOf(file.type, name), blob: own, status: "local", sha256: null, added_at: new Date().toISOString(),
-    remote_name: `${visitId}__${pad(idx)}_${safeName(name)}`, stored: "copy",
+    kind: kindOf(file.type, name), status: "local", sha256: null, added_at: new Date().toISOString(),
+    remote_name: `${visitId}__${pad(idx)}_${safeName(name)}`, stored: "blobs",
   };
+  await blobs.add(rec.id, own); // байты — один раз, без последующей перезаписи
   await files.put(rec);
   await log("info", `Добавлен ${name} (${file.type || "?"}, ${fmtSize(own.size)}), копия сохранена на телефоне`);
   // SHA-256 считаем по сохранённой копии (перечитанной из хранилища) — так проверяется и она сама.
-  files.get(rec.id).then((saved) => sha256Blob(saved.blob)).then((sha) => files.patch(rec.id, { sha256: sha }))
+  blobs.get(rec.id).then((saved) => sha256Blob(saved)).then((sha) => files.patch(rec.id, { sha256: sha }))
     .then(() => route.name === "visit" && render())
     .catch((e) => log("error", `SHA-256 ${name}: ${e.message}`));
   return rec;
@@ -447,6 +451,7 @@ async function renderDiag(token) {
       <button class="btn" id="t-hash">Тест SHA-256</button>
       <button class="btn" id="t-persist">Защитить хранилище</button>
     </div>
+    <button class="btn mt-10" id="t-store">Тест хранения файлов</button>
     <button class="btn btn-gold mt-10" id="t-upload" ${token ? "" : "disabled"}>Тест загрузки в Яндекс.Диск</button>
     <div id="t-out" class="card small mono mt-10" hidden></div>
     <h2>Журнал</h2>
@@ -469,10 +474,34 @@ async function renderDiag(token) {
     toast(r ? "Хранилище защищено" : "iOS не дал защиту — добавьте приложение на экран «Домой»");
     render();
   };
+  document.getElementById("t-store").onclick = () => storageTest(print, out);
   const up = document.getElementById("t-upload");
   if (up) up.onclick = () => uploadTest(print, out);
   const lo = document.getElementById("logout");
   if (lo) lo.onclick = logout;
+}
+
+/** Проверка на iPhone: файл в хранилище остаётся читаемым после многократной смены статуса. */
+async function storageTest(print, out) {
+  out.textContent = "";
+  const id = `__selftest/${Date.now()}`;
+  try {
+    const data = crypto.getRandomValues(new Uint8Array(65536));
+    const blob = new Blob([data, data, data, data, data, data, data, data], { type: "image/jpeg" });
+    const sha = await sha256Blob(blob);
+    await blobs.add(id, blob);
+    await files.put({ id, visit_id: "__selftest", idx: 0, name: "selftest", status: "local" });
+    print(`1. Сохранён тестовый файл ${fmtSize(blob.size)}`);
+    for (let i = 1; i <= 3; i++) await files.patch(id, { status: `test${i}`, attempts: i });
+    print("2. Статус изменён 3 раза");
+    const fresh = await blobs.get(id);
+    const sha2 = await sha256Blob(fresh);
+    print(sha2 === sha ? "3. ✓ Файл читается целиком, SHA-256 совпал" : "3. ✕ SHA-256 НЕ совпал");
+  } catch (e) {
+    print(`✕ ${e.name}: ${e.message}`);
+  } finally {
+    await files.del(id).catch(() => {});
+  }
 }
 
 /** Проверка всей цепочки: CORS API → ссылка загрузки → PUT на сервер загрузки → SHA-256 в облаке → повтор без дубля. */

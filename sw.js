@@ -1,7 +1,7 @@
 // Service Worker: оболочка приложения доступна без интернета.
 // Запросы к Яндекс.Диску (другой домен) не перехватываются и не кэшируются.
 
-const VERSION = "vellor-708f0d4a64";
+const VERSION = "vellor-46240167d8";
 const SHELL = [
   "./", "index.html", "css/app.css", "manifest.webmanifest",
   "js/app.js", "js/config.js", "js/hash.js", "js/store.js", "js/sync.js", "js/yadisk.js",
