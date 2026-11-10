@@ -216,19 +216,33 @@ async function newVisit() {
   captureGps(v.id);
 }
 
+/** GPS: первое определение бывает грубым (по Wi-Fi/сотам) — 30 с уточняем и храним самое точное. */
 function captureGps(id) {
   if (!navigator.geolocation) return;
-  navigator.geolocation.getCurrentPosition(
+  let best = Infinity;
+  const watch = navigator.geolocation.watchPosition(
     async (pos) => {
+      const acc = Math.round(pos.coords.accuracy);
+      if (acc >= best) return;
+      best = acc;
       const v = await visits.get(id);
-      if (!v || v.status !== "draft") return;
-      v.gps = { lat: +pos.coords.latitude.toFixed(6), lon: +pos.coords.longitude.toFixed(6), acc: Math.round(pos.coords.accuracy), at: new Date(pos.timestamp).toISOString() };
+      if (!v || v.status !== "draft") return navigator.geolocation.clearWatch(watch);
+      v.gps = { lat: +pos.coords.latitude.toFixed(6), lon: +pos.coords.longitude.toFixed(6), acc, at: new Date(pos.timestamp).toISOString() };
       await visits.put(v);
-      if (route.name === "visit" && route.id === id) render();
+      if (route.name === "visit" && route.id === id && !recorder) {
+        const el = document.getElementById("gps-text");
+        if (el) el.innerHTML = `${v.gps.lat}, ${v.gps.lon} <span class="muted">±${acc} м</span>`;
+      }
+      if (acc <= 20) navigator.geolocation.clearWatch(watch);
     },
-    async (err) => { await log("warn", `GPS: ${err.message}`); if (route.name === "visit") toast("GPS недоступен: " + err.message); },
-    { enableHighAccuracy: true, timeout: 20000, maximumAge: 60000 }
+    async (err) => {
+      navigator.geolocation.clearWatch(watch);
+      await log("warn", `GPS: ${err.message}`);
+      if (route.name === "visit") toast("GPS недоступен: " + err.message);
+    },
+    { enableHighAccuracy: true, timeout: 30000, maximumAge: 0 }
   );
+  setTimeout(() => navigator.geolocation.clearWatch(watch), 30000);
 }
 
 function thumb(f) {
@@ -259,7 +273,7 @@ async function renderVisit(id) {
     <label class="field"><span>Комментарий</span>
       <textarea id="f-notes" class="input" ${editable ? "" : "disabled"}>${esc(v.notes)}</textarea></label>
     <div class="card small"><div class="card-row">
-      <div><span class="muted">GPS:</span> ${v.gps ? `${v.gps.lat}, ${v.gps.lon} <span class="muted">±${v.gps.acc} м</span>` : `<span class='muted'>${editable ? "определяется…" : "не определён"}</span>`}</div>
+      <div><span class="muted">GPS:</span> <span id="gps-text">${v.gps ? `${v.gps.lat}, ${v.gps.lon} <span class="muted">±${v.gps.acc} м</span>` : `<span class='muted'>${editable ? "определяется…" : "не определён"}</span>`}</span>${v.gps?.acc > 100 ? `<div class="small warn">Низкая точность — включите «Точная геопозиция» для Safari</div>` : ""}</div>
       <div class="muted">${esc(v.visit_at.replace("T", " ").slice(0, 16))}</div>
     </div></div>
 
@@ -457,6 +471,14 @@ async function uploadTest(print, out) {
     print("3. Повторная отправка того же файла…");
     const r2 = await uploadVerified(yd, path, body, sha);
     print(`   ✓ ${r2 === "already" ? "распознан как уже загруженный — дубликат не создан" : r2}`);
+    // Как настоящее фото: двоичные данные с типом image/jpeg (раньше тест этого не проверял).
+    const bin = new Blob([crypto.getRandomValues(new Uint8Array(65536)), new Uint8Array(1024 * 1024 - 65536)], { type: "image/jpeg" });
+    const binSha = await sha256Blob(bin);
+    const binPath = `app:/DIAG/test_${newPackageId()}.jpg`;
+    print(`4. Двоичный файл как фото (${fmtSize(bin.size)}, image/jpeg)…`);
+    const t1 = performance.now();
+    const r3 = await uploadVerified(yd, binPath, bin, binSha);
+    print(`   ✓ ${r3}: SHA-256 совпал, ${((bin.size / 1048576) / ((performance.now() - t1) / 1000)).toFixed(1)} МБ/с`);
     print(`Готово за ${((performance.now() - t0) / 1000).toFixed(1)} с`);
     await log("info", `Тест загрузки успешен: ${path}`);
   } catch (e) {

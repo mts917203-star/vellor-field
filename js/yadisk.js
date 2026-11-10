@@ -82,9 +82,12 @@ export class YaDisk {
         // при следующей попытке проверим облако и возьмём новую ссылку.
         else reject(new NetError(`сервер загрузки ответил ${xhr.status}`));
       };
-      xhr.onerror = () => reject(new NetError("загрузка прервана: нет связи или CORS"));
+      xhr.onerror = () => reject(new NetError(navigator.onLine ? "загрузка прервана (сеть или CORS сервера загрузки)" : "нет сети"));
       xhr.ontimeout = () => reject(new NetError("загрузка: таймаут"));
-      xhr.send(blob);
+      // Без заголовка Content-Type: сервер загрузки Яндекса не разрешает его в CORS-preflight
+      // (фото image/jpeg блокировалось, text/plain проходил). slice() не копирует данные,
+      // только убирает тип — байты и SHA-256 те же; тип файла Яндекс определяет сам.
+      xhr.send(blob.type ? blob.slice(0, blob.size, "") : blob);
     });
   }
 

@@ -139,7 +139,7 @@ label.field span { display: block; font-size: 12px; color: var(--muted); margin-
 textarea.input { min-height: 84px; resize: vertical; }
 
 /* --- файлы --- */
-.file { display: grid; grid-template-columns: 52px 1fr auto; gap: 12px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
+.file { display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
 .file:first-child { border-top: 0; }
 .thumb {
   width: 52px; height: 52px; border-radius: 10px; object-fit: cover; background: var(--surface-2);
