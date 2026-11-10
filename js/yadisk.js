@@ -3,6 +3,7 @@
 
 export class NetError extends Error {}  // нет сети / соединение оборвано → повторить позже
 export class AuthError extends Error {} // токен недействителен → войти заново
+export class UnreadableError extends Error {} // файл на телефоне больше не читается → добавить заново
 export class ApiError extends Error {
   constructor(status, data) {
     super(`${status} ${data?.error || ""} ${data?.message || data?.description || ""}`.trim());
@@ -66,12 +67,38 @@ export class YaDisk {
     return r.data; // {href, method}
   }
 
-  /** PUT файла по ссылке загрузки (через XHR — нужен прогресс). */
-  putFile(link, blob, onProgress) {
+  /**
+   * PUT файла по ссылке загрузки (через XHR — нужен прогресс).
+   * Тело — ArrayBuffer (файл читается в память): у iOS бывают «битые» Blob из IndexedDB, которые
+   * XHR не может отправить и молча обрывает запрос; чтение в память даёт явную ошибку NotReadableError.
+   * ArrayBuffer к тому же уходит без Content-Type — его не разрешает CORS сервера загрузки Яндекса.
+   * Для очень больших файлов (> MAX_MEM) — Blob без типа (slice не копирует данные).
+   */
+  async putFile(link, blob, onProgress, onPhase) {
+    const MAX_MEM = 300 * 1024 * 1024;
+    let body;
+    if (blob.size <= MAX_MEM) {
+      const t = performance.now();
+      try { body = await blob.arrayBuffer(); }
+      catch (e) { throw new UnreadableError(`файл на телефоне не читается (${e.name}): iOS удалил его копию — добавьте файл заново`); }
+      onPhase?.(`прочитан в память за ${((performance.now() - t) / 1000).toFixed(1)} с`);
+    } else {
+      body = blob.type ? blob.slice(0, blob.size, "") : blob;
+    }
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
+      const t0 = performance.now();
+      let sent = 0;
+      let lastQuarter = 0;
       xhr.open(link.method || "PUT", link.href);
-      xhr.upload.onprogress = (e) => e.lengthComputable && onProgress?.(e.loaded / e.total);
+      xhr.upload.onprogress = (e) => {
+        if (!e.lengthComputable) return;
+        sent = e.loaded;
+        onProgress?.(e.loaded / e.total);
+        const q = Math.floor((e.loaded / e.total) * 4);
+        if (q > lastQuarter && q < 4) { lastQuarter = q; onPhase?.(`передано ${q * 25}% за ${((performance.now() - t0) / 1000).toFixed(1)} с`); }
+      };
+      xhr.upload.onload = () => onPhase?.(`данные переданы за ${((performance.now() - t0) / 1000).toFixed(1)} с, ждём ответ сервера`);
       xhr.onload = () => {
         if (xhr.status === 201 || xhr.status === 202 || xhr.status === 200) resolve(xhr.status);
         // Окончательные отказы: нет места на Диске / файл слишком большой.
@@ -82,12 +109,13 @@ export class YaDisk {
         // при следующей попытке проверим облако и возьмём новую ссылку.
         else reject(new NetError(`сервер загрузки ответил ${xhr.status}`));
       };
-      xhr.onerror = () => reject(new NetError(navigator.onLine ? "загрузка прервана (сеть или CORS сервера загрузки)" : "нет сети"));
+      xhr.onerror = () => {
+        const secs = ((performance.now() - t0) / 1000).toFixed(1);
+        const where = sent ? `после ${Math.round((sent / blob.size) * 100)}% данных` : "до начала передачи (вероятно CORS/предзапрос)";
+        reject(new NetError(navigator.onLine ? `загрузка прервана ${where}, через ${secs} с` : "нет сети"));
+      };
       xhr.ontimeout = () => reject(new NetError("загрузка: таймаут"));
-      // Без заголовка Content-Type: сервер загрузки Яндекса не разрешает его в CORS-preflight
-      // (фото image/jpeg блокировалось, text/plain проходил). slice() не копирует данные,
-      // только убирает тип — байты и SHA-256 те же; тип файла Яндекс определяет сам.
-      xhr.send(blob.type ? blob.slice(0, blob.size, "") : blob);
+      xhr.send(body);
     });
   }
 

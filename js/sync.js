@@ -10,7 +10,7 @@
 import { APP_VERSION, CONFIG } from "./config.js";
 import { sha256Blob } from "./hash.js";
 import { files, kv, log, visits } from "./store.js";
-import { ApiError, AuthError, NetError, YaDisk } from "./yadisk.js";
+import { ApiError, AuthError, NetError, UnreadableError, YaDisk } from "./yadisk.js";
 
 export class IntegrityError extends Error {}
 export class ConflictError extends Error {}
@@ -43,7 +43,9 @@ async function waitMeta(yd, path, tries = 8) {
  * Загружает blob в path без перезаписи и проверяет SHA-256 в облаке.
  * Возвращает "uploaded" | "already" (файл уже был в облаке с тем же хэшем).
  */
-export async function uploadVerified(yd, path, blob, sha256, onProgress) {
+export async function uploadVerified(yd, path, blob, sha256, onProgress, onPhase) {
+  const t0 = performance.now();
+  const secs = () => ((performance.now() - t0) / 1000).toFixed(1);
   const existing = await yd.meta(path);
   if (existing) {
     if (existing.sha256 === sha256) return "already";
@@ -54,10 +56,13 @@ export async function uploadVerified(yd, path, blob, sha256, onProgress) {
     throw new ConflictError(`в облаке уже есть другой файл ${path.split("/").pop()}`);
   }
   const link = await yd.uploadLink(path);
-  if (!link) return uploadVerified(yd, path, blob, sha256, onProgress); // появился между запросами
-  await yd.putFile(link, blob, onProgress);
+  if (!link) return uploadVerified(yd, path, blob, sha256, onProgress, onPhase); // появился между запросами
+  onPhase?.(`ссылка загрузки получена за ${secs()} с`);
+  await yd.putFile(link, blob, onProgress, onPhase);
+  onPhase?.(`сервер принял файл (${secs()} с), ждём подтверждение SHA-256 от Яндекса`);
   const m = await waitMeta(yd, path);
   if (!m) throw new NetError("файл загружен, но Яндекс ещё не подтвердил его — проверим позже");
+  onPhase?.(`Яндекс подтвердил SHA-256, всего ${secs()} с`);
   if (m.sha256 !== sha256) throw new IntegrityError(`SHA-256 в облаке не совпал: ${path.split("/").pop()}`);
   if (m.size !== blob.size) throw new IntegrityError(`размер в облаке не совпал: ${m.size} ≠ ${blob.size}`);
   return "uploaded";
@@ -74,14 +79,31 @@ async function ensureHashed(f) {
   return files.patch(f.id, { sha256: sha });
 }
 
+/** Читается ли файл на телефоне (iOS мог удалить временную копию). Таймаут — чтобы не зависнуть. */
+async function checkReadable(blob) {
+  const read = blob.slice(0, Math.min(blob.size, 65536)).arrayBuffer().then(() => true);
+  const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error("чтение зависло")), 10000));
+  try { return await Promise.race([read, timeout]); }
+  catch (e) { throw new UnreadableError(`файл на телефоне не читается (${e.name === "Error" ? e.message : e.name}): iOS удалил его копию — добавьте файл заново`); }
+}
+
 async function uploadFile(yd, f) {
+  try {
+    await checkReadable(f.blob);
+  } catch (e) {
+    await files.patch(f.id, { status: "error", error: e.message, error_kind: "unreadable" });
+    await log("error", `${f.name}: ${e.message}`);
+    emit({ type: "file", id: f.id, phase: "done" });
+    return;
+  }
   f = await ensureHashed(f);
   await files.patch(f.id, { status: "uploading", error: null, attempts: (f.attempts || 0) + 1 });
   emit({ type: "file", id: f.id, phase: "uploading", progress: 0 });
+  await log("info", `${f.name} (${(f.size / 1048576).toFixed(1)} МБ): начало отправки, попытка ${(f.attempts || 0) + 1}`);
   try {
-    const res = await uploadVerified(yd, remotePath(f.remote_name), f.blob, f.sha256, (p) =>
-      emit({ type: "file", id: f.id, phase: "uploading", progress: p })
-    );
+    const res = await uploadVerified(yd, remotePath(f.remote_name), f.blob, f.sha256,
+      (p) => emit({ type: "file", id: f.id, phase: "uploading", progress: p }),
+      (msg) => log("info", `${f.name}: ${msg}`));
     await files.patch(f.id, { status: "cloud", error: null, verified_at: new Date().toISOString(), dedup: res === "already" });
     await log("info", `${f.remote_name}: ${res === "already" ? "уже был в облаке (дубликат не создан)" : "загружен, SHA-256 совпал"}`);
   } catch (e) {
@@ -89,7 +111,8 @@ async function uploadFile(yd, f) {
       await files.patch(f.id, { status: "local", error: `${e.message} (попытка ${(f.attempts || 0) + 1}, повторим автоматически)` });
       throw e; // прерываем весь цикл — повторим, когда появится связь
     }
-    const kind = e instanceof IntegrityError ? "integrity" : e instanceof ConflictError ? "conflict" : "api";
+    const kind = e instanceof IntegrityError ? "integrity" : e instanceof ConflictError ? "conflict"
+      : e instanceof UnreadableError ? "unreadable" : "api";
     await files.patch(f.id, { status: "error", error: e.message, error_kind: kind });
     await log("error", `${f.remote_name}: ${e.message}`);
   } finally {
@@ -199,6 +222,7 @@ export async function syncAll(reason = "") {
 export async function retryErrors(visitId) {
   for (const f of await files.byVisit(visitId)) {
     if (f.status !== "error") continue;
+    if (f.error_kind === "unreadable") continue; // повтор не поможет — только исключить или добавить заново
     const patch = { status: "local", error: null };
     if (f.error_kind === "integrity" || f.error_kind === "conflict") {
       const n = (f.rename_n || 1) + 1;

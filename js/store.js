@@ -56,6 +56,7 @@ export const files = {
   byVisit: (vid) => tx("files", "readonly", (s) => wrap(s.index("visit").getAll(vid))).then((a) => a.sort((x, y) => x.idx - y.idx)),
   get: (id) => tx("files", "readonly", (s) => wrap(s.get(id))),
   put: (f) => tx("files", "readwrite", (s) => { s.put(f); }),
+  del: (id) => tx("files", "readwrite", (s) => { s.delete(id); }),
   /** Обновить поля без перезаписи Blob вручную. */
   patch: async (id, fields) => {
     const f = await files.get(id);

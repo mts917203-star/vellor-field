@@ -296,7 +296,8 @@ async function renderVisit(id) {
         <div style="min-width:0">
           <div class="file-name">${esc(f.name)}</div>
           <div class="file-meta">${esc(f.type || "?")} · ${fmtSize(f.size)}${f.sha256 ? ` · <span class="mono">${f.sha256.slice(0, 10)}…</span>` : ""}</div>
-          ${f.error ? `<div class="file-meta bad">${esc(f.error)}</div>` : ""}
+          ${f.error ? `<div class="file-meta ${f.status === "local" ? "warn" : "bad"}">${esc(f.error)}</div>` : ""}
+          ${f.error_kind === "unreadable" && f.status === "error" ? `<button class="btn btn-ghost btn-danger small" data-drop="${esc(f.id)}" style="min-height:34px;margin-top:6px">Исключить из осмотра</button>` : ""}
           <div class="bar"><i></i></div>
         </div>
         ${fileStatusChip(f)}
@@ -342,6 +343,14 @@ async function renderVisit(id) {
       syncAll("send");
     };
   }
+  $view.querySelectorAll("[data-drop]").forEach((b) => (b.onclick = async () => {
+    const f = await files.get(b.dataset.drop);
+    if (!f || !confirm(`Исключить «${f.name}» из осмотра? Файл на телефоне уже недоступен, отправить его нельзя.`)) return;
+    await files.del(f.id);
+    await log("warn", `${f.name}: исключён из осмотра (файл недоступен на телефоне)`);
+    render();
+    syncAll("drop");
+  }));
   const syncBtn = document.getElementById("sync");
   if (syncBtn) syncBtn.onclick = async () => { await retryErrors(id); render(); syncAll("manual"); };
 }
@@ -351,14 +360,28 @@ export async function addFile(visitId, file) {
   const existing = await files.byVisit(visitId);
   const idx = existing.length ? Math.max(...existing.map((f) => f.idx)) + 1 : 1;
   const name = file.name || `file_${idx}`;
+  // iOS отдаёт снимки камеры/галереи как ссылку на временный файл, который удаляется после
+  // закрытия приложения. Поэтому сразу копируем байты в собственный Blob — он хранится в IndexedDB.
+  let own;
+  try {
+    const parts = [];
+    for (let off = 0; off < file.size; off += 8 * 1024 * 1024) parts.push(await file.slice(off, off + 8 * 1024 * 1024).arrayBuffer());
+    own = new Blob(parts, { type: file.type || "" });
+  } catch (e) {
+    await log("error", `Не удалось прочитать ${name}: ${e.message}`);
+    toast(`Не удалось сохранить ${name}`, 4000);
+    return null;
+  }
   const rec = {
-    id: `${visitId}/${idx}`, visit_id: visitId, idx, name, type: file.type || "", size: file.size,
-    kind: kindOf(file.type, name), blob: file, status: "local", sha256: null, added_at: new Date().toISOString(),
-    remote_name: `${visitId}__${pad(idx)}_${safeName(name)}`,
+    id: `${visitId}/${idx}`, visit_id: visitId, idx, name, type: file.type || "", size: own.size,
+    kind: kindOf(file.type, name), blob: own, status: "local", sha256: null, added_at: new Date().toISOString(),
+    remote_name: `${visitId}__${pad(idx)}_${safeName(name)}`, stored: "copy",
   };
   await files.put(rec);
-  await log("info", `Добавлен ${name} (${file.type || "?"}, ${fmtSize(file.size)})`);
-  sha256Blob(file).then((sha) => files.patch(rec.id, { sha256: sha })).then(() => route.name === "visit" && render())
+  await log("info", `Добавлен ${name} (${file.type || "?"}, ${fmtSize(own.size)}), копия сохранена на телефоне`);
+  // SHA-256 считаем по сохранённой копии (перечитанной из хранилища) — так проверяется и она сама.
+  files.get(rec.id).then((saved) => sha256Blob(saved.blob)).then((sha) => files.patch(rec.id, { sha256: sha }))
+    .then(() => route.name === "visit" && render())
     .catch((e) => log("error", `SHA-256 ${name}: ${e.message}`));
   return rec;
 }
