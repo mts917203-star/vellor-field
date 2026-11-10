@@ -413,7 +413,7 @@ async function renderDiag(token) {
     <button class="btn btn-gold" id="t-upload" style="margin-top:10px" ${token ? "" : "disabled"}>Тест загрузки в Яндекс.Диск</button>
     <div id="t-out" class="card small mono" style="margin-top:10px" hidden></div>
     <h2>Журнал</h2>
-    <div class="card log">${logEntries.map((l) => `<div><span class="${l.level === "error" ? "bad" : l.level === "warn" ? "warn" : "muted"}">${esc(l.t.slice(11, 19))}</span> ${esc(l.msg)}</div>`).join("") || "<div class='muted'>пусто</div>"}</div>
+    <div class="card log">${logEntries.map((l) => `<div><span class="${l.level === "error" ? "bad" : l.level === "warn" ? "warn" : "muted"}">${esc(new Date(l.t).toLocaleTimeString("ru-RU"))}</span> ${esc(l.msg)}</div>`).join("") || "<div class='muted'>пусто</div>"}</div>
     ${token ? `<button class="btn btn-ghost btn-danger" id="logout" style="margin-top:14px">Выйти из Яндекса</button>` : ""}`;
   document.getElementById("back").onclick = () => go({ name: "home" });
   const out = document.getElementById("t-out");
@@ -475,7 +475,8 @@ onSyncEvent((e) => {
     if (bar && e.progress != null) bar.style.width = `${Math.round(e.progress * 100)}%`;
     if (e.phase === "done") render();
   } else if (e.type === "visit" || (e.type === "sync" && !e.running)) {
-    if (!recorder) render();
+    if (!recorder && route.name !== "diag") render(); // не стирать результаты тестов на экране диагностики
+    else updateNet();
   } else updateNet();
 });
 
