@@ -5,7 +5,7 @@
 export const APP_VERSION = "0.1.0-proto";
 
 export const CONFIG = {
-  CLIENT_ID: "", // заполняется после регистрации приложения на oauth.yandex.ru
+  CLIENT_ID: "c267073e62ae42e498db4f7345baefd6", // заполняется после регистрации приложения на oauth.yandex.ru
   API_BASE: "https://cloud-api.yandex.net",
   SCOPE: "cloud_api:disk.app_folder", // только папка «Приложения/<название>» — минимальный доступ
   INBOX: "app:/INBOX",
